@@ -1,0 +1,36 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "octobox_tui"
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts "octobox_tui - A terminal UI for Octobox notifications"
+  puts ""
+  puts "Usage: octobox_tui [options]"
+  puts ""
+  puts "Options:"
+  puts "  -h, --help     Show this help"
+  puts "  -v, --version  Show version"
+  puts ""
+  puts "Environment:"
+  puts "  OCTOBOX_API_TOKEN    Octobox API token (or create ~/.octobox_tui/token)"
+  puts "  OCTOBOX_URL          Octobox instance URL (default: https://octobox.io)"
+  puts "  OCTOBOX_TUI_DATA_DIR Data directory (default: ~/.octobox_tui)"
+  puts ""
+  puts "Get your API token from your Octobox settings page."
+  exit 0
+end
+
+if ARGV.include?("--version") || ARGV.include?("-v")
+  puts "octobox_tui #{OctoboxTui::VERSION}"
+  exit 0
+end
+
+begin
+  OctoboxTui::App.new.run
+rescue Interrupt
+  exit 0
+rescue OctoboxTui::Error => e
+  warn "Error: #{e.message}"
+  exit 1
+end
