@@ -160,9 +160,11 @@ module OctoboxTui
           is_current = @state.filter == item[:value] && @state.sidebar_filter.nil?
           style = is_current ? @style_tab_highlight : nil
           prefix = is_current ? "> " : "  "
+          # Don't show count for archived tab
+          count_str = item[:value] == :archived ? "" : count.to_s
           [
             style ? @tui.table_cell(content: "#{prefix}#{item[:label]}", style: style) : "#{prefix}#{item[:label]}",
-            @tui.table_cell(content: count.to_s, style: @style_muted)
+            @tui.table_cell(content: count_str, style: @style_muted)
           ]
         else
           indent = item[:indent] ? "    " : "  "
@@ -265,16 +267,30 @@ module OctoboxTui
         return
       end
 
-      rows = notifications.map { |n| build_table_row(n) }
+      # Show author column on wide terminals (> 120 cols)
+      show_author = area.width > 120
+      rows = notifications.map { |n| build_table_row(n, show_author: show_author) }
 
-      widths = [
-        @tui.constraint_length(4),
-        @tui.constraint_length(1),
-        @tui.constraint_length(30),
-        @tui.constraint_fill(1),
-        @tui.constraint_length(4),
-        @tui.constraint_length(6)
-      ]
+      widths = if show_author
+        [
+          @tui.constraint_length(4),
+          @tui.constraint_length(1),
+          @tui.constraint_length(30),
+          @tui.constraint_fill(1),
+          @tui.constraint_length(20),
+          @tui.constraint_length(4),
+          @tui.constraint_length(6)
+        ]
+      else
+        [
+          @tui.constraint_length(4),
+          @tui.constraint_length(1),
+          @tui.constraint_length(30),
+          @tui.constraint_fill(1),
+          @tui.constraint_length(4),
+          @tui.constraint_length(6)
+        ]
+      end
 
       table = @tui.table(
         rows: rows,
@@ -308,7 +324,7 @@ module OctoboxTui
       end
     end
 
-    def build_table_row(notification)
+    def build_table_row(notification, show_author: false)
       type_style = case notification.state_style
       when :open then @style_open
       when :closed then @style_closed
@@ -322,10 +338,16 @@ module OctoboxTui
         @tui.table_cell(content: notification.type_label, style: type_style),
         @tui.table_cell(content: notification.reason_icon, style: @style_reason),
         notification.display_ref,
-        title_style ? @tui.table_cell(content: truncate(notification.subject_title || "", 60), style: title_style) : truncate(notification.subject_title || "", 60),
-        @tui.table_cell(content: notification.age, style: @style_muted),
-        @tui.table_cell(content: notification.display_status, style: @style_starred)
+        title_style ? @tui.table_cell(content: truncate(notification.subject_title || "", 80), style: title_style) : truncate(notification.subject_title || "", 80)
       ]
+
+      if show_author
+        author = truncate(notification.subject_author || "-", 18)
+        cells << @tui.table_cell(content: author, style: @style_muted)
+      end
+
+      cells << @tui.table_cell(content: notification.age, style: @style_muted)
+      cells << @tui.table_cell(content: notification.display_status, style: @style_starred)
 
       @tui.table_row(cells: cells)
     end
@@ -356,7 +378,7 @@ module OctoboxTui
       elsif @state.sidebar_focus
         "j/k:move  Enter:select  l/Right:list  Esc:clear filter  q:quit"
       else
-        "j/k:move  h:sidebar  /:search  o:open  s:star  e:archive  C-a:archive all  m:mute  r:refresh  ?:help  q:quit"
+        "j/k:move  h:sidebar  /:search  o:open  s:star  e:archive  C-a:archive all  m:mute  r:refresh  R:sync  ?:help  q:quit"
       end
       frame.render_widget(
         @tui.paragraph(text: " #{help_text}", style: @style_muted),
@@ -405,7 +427,9 @@ module OctoboxTui
     end
 
     def handle_input
-      case @tui.poll_event
+      event = @tui.poll_event
+      log.info "Key: #{event[:code]}" if event.is_a?(Hash) && event[:type] == :key
+      case event
       in { type: :key, code: "q" } | { type: :key, code: "c", modifiers: ["ctrl"] }
         return :quit unless @state.search_mode
         exit_search_mode
@@ -509,7 +533,10 @@ module OctoboxTui
         unarchive_all
 
       in { type: :key, code: "r" }
-        refresh_all unless @state.search_mode
+        fetch_from_octobox unless @state.search_mode
+
+      in { type: :key, code: "R" } | { type: :key, code: "r", modifiers: ["shift"] }
+        sync_with_github unless @state.search_mode
 
       in { type: :key, code: "backspace" }
         handle_backspace if @state.search_mode
@@ -697,9 +724,19 @@ module OctoboxTui
 
       new_archived = !notification.archived
 
-      # Update UI immediately
+      # Update cache
       @cache.update_notification(notification.id, archived: new_archived)
-      reload_notifications
+
+      # Update UI - for pinned searches, remove item from list if archiving
+      if @state.sidebar_filter && @state.sidebar_filter[:type] == :pinned
+        if new_archived
+          updated = @state.notifications.reject { |n| n.id == notification.id }
+          @state = @state.with(notifications: updated).clamp_selection
+          @table_state.select(@state.selected_index)
+        end
+      else
+        reload_notifications
+      end
 
       # API call in background
       Thread.new do
@@ -722,10 +759,17 @@ module OctoboxTui
 
       log.info "Archiving all #{notifications.size} visible notifications"
 
-      # Update UI immediately
+      # Update cache
       ids = notifications.map(&:id)
       ids.each { |id| @cache.update_notification(id, archived: true) }
-      reload_notifications
+
+      # Update UI - for pinned searches, clear the list since all are archived
+      if @state.sidebar_filter && @state.sidebar_filter[:type] == :pinned
+        @state = @state.with(notifications: [], selected_index: 0)
+        @table_state.select(0)
+      else
+        reload_notifications
+      end
 
       # API call in background
       Thread.new do
@@ -779,9 +823,17 @@ module OctoboxTui
       notification = @state.filtered_notifications[@state.selected_index]
       return unless notification
 
-      # Update UI immediately
+      # Update cache
       @cache.update_notification(notification.id, muted: true, archived: true)
-      reload_notifications
+
+      # Update UI - for pinned searches, remove item from list
+      if @state.sidebar_filter && @state.sidebar_filter[:type] == :pinned
+        updated = @state.notifications.reject { |n| n.id == notification.id }
+        @state = @state.with(notifications: updated).clamp_selection
+        @table_state.select(@state.selected_index)
+      else
+        reload_notifications
+      end
 
       # API call in background
       Thread.new do
@@ -818,76 +870,82 @@ module OctoboxTui
 
     def sync_if_stale
       if @cache.stale?
-        log.info "Cache is stale, triggering sync"
-        spawn_sync_thread
+        log.info "Cache is stale, fetching from Octobox"
+        fetch_from_octobox
       else
-        log.info "Cache is fresh, skipping sync"
+        log.info "Cache is fresh, skipping fetch"
       end
     end
 
-    def refresh_all
-      log.info "Manual refresh triggered"
-      spawn_sync_thread
-    end
-
-    def spawn_sync_thread
+    def fetch_from_octobox
+      log.info "Fetching from Octobox..."
       Thread.new do
-        sync_all
+        do_fetch
       rescue => e
-        log.error "Sync thread error: #{e.message}"
+        log.error "Fetch error: #{e.message}"
         log.error e.backtrace.first(5).join("\n")
       end
     end
 
-    def sync_all
-      log.info "Starting sync..."
-      @state = @state.with(syncing: true)
-
-      begin
-        # Trigger sync with GitHub (ignore errors - may already be syncing)
-        begin
-          @client.sync
-        rescue OctoboxTui::Error => e
-          log.warn "Sync trigger failed (may already be syncing): #{e.message}"
-        end
-
-        # Wait for sync to complete
-        attempts = 0
-        while @client.syncing? && attempts < 30
-          log.debug "Waiting for sync to complete (attempt #{attempts + 1})"
-          sleep 1
-          attempts += 1
-        end
-
-        @state = @state.with(loading: true, syncing: false)
-
-        # Fetch pinned searches
-        log.info "Fetching pinned searches..."
-        @pinned_searches = @client.pinned_searches
-        log.info "Got #{@pinned_searches.size} pinned searches"
-
-        # Fetch all notifications
-        log.info "Fetching notifications from Octobox..."
-        all_notifications = @client.fetch_all_notifications
-        log.info "Got #{all_notifications.size} notifications total from API"
-
-        models = all_notifications.map { |data| Models::Notification.from_api(data) }
-        @cache.clear_and_save_notifications(models)
-
-        # Build sidebar data from cache
-        sidebar_data = @cache.sidebar_data
-        log.info "Built sidebar: #{sidebar_data["owner_counts"]&.size} owners, #{sidebar_data["types"]&.size} types, #{sidebar_data["reasons"]&.size} reasons"
-
-        @state = @state.with(sidebar_data: sidebar_data, pinned_searches: @pinned_searches)
-        reload_notifications
-        log.info "Sync complete, #{@state.notifications.size} notifications in current view"
+    def sync_with_github
+      log.info "Full sync with GitHub triggered"
+      Thread.new do
+        do_github_sync
+        do_fetch
       rescue => e
-        log.error "Sync failed: #{e.message}"
+        log.error "Sync error: #{e.message}"
         log.error e.backtrace.first(5).join("\n")
-        @state = @state.with(error: e.message)
-      ensure
-        @state = @state.with(loading: false, syncing: false)
       end
+    end
+
+    def do_github_sync
+      @state = @state.with(syncing: true)
+      begin
+        @client.sync
+      rescue OctoboxTui::Error => e
+        log.warn "Sync trigger failed (may already be syncing): #{e.message}"
+      end
+
+      # Wait for sync to complete
+      attempts = 0
+      while @client.syncing? && attempts < 30
+        log.info "Waiting for GitHub sync (attempt #{attempts + 1})"
+        sleep 1
+        attempts += 1
+      end
+      log.info "GitHub sync done after #{attempts} attempts"
+      @state = @state.with(syncing: false)
+    end
+
+    def do_fetch
+      @state = @state.with(loading: true)
+
+      # Fetch pinned searches
+      log.info "Fetching pinned searches..."
+      @pinned_searches = @client.pinned_searches
+      log.info "Got #{@pinned_searches.size} pinned searches"
+
+      # Fetch all notifications
+      log.info "Fetching notifications from Octobox..."
+      all_notifications = @client.fetch_all_notifications
+      log.info "Got #{all_notifications.size} notifications from Octobox"
+
+      models = all_notifications.map { |data| Models::Notification.from_api(data) }
+      @cache.clear_and_save_notifications(models)
+
+      # Build sidebar data from cache
+      sidebar_data = @cache.sidebar_data
+      log.info "Built sidebar: #{sidebar_data["owner_counts"]&.size} owners, #{sidebar_data["types"]&.size} types"
+
+      @state = @state.with(sidebar_data: sidebar_data, pinned_searches: @pinned_searches)
+      reload_notifications
+      log.info "Fetch complete, #{@state.notifications.size} notifications in current view"
+    rescue => e
+      log.error "Fetch failed: #{e.message}"
+      log.error e.backtrace.first(5).join("\n")
+      @state = @state.with(error: e.message)
+    ensure
+      @state = @state.with(loading: false)
     end
 
     def truncate(str, max)

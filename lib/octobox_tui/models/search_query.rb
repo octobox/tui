@@ -304,9 +304,12 @@ module OctoboxTui
       end
 
       def bot_notification?(notification)
-        return false unless notification.repo_owner
-        owner = notification.repo_owner.downcase
-        BOT_PATTERNS.any? { |p| owner.include?(p) }
+        # Check subject_author first (matches Octobox's bot_author scope)
+        if notification.subject_author
+          author = notification.subject_author.downcase
+          return true if author.include?("[bot]") || author.end_with?("-bot")
+        end
+        false
       end
     end
   end

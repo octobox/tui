@@ -114,12 +114,13 @@ module OctoboxTui
         status&.dig(:last_sync)
       end
 
-      BOT_PATTERNS = %w[[bot] dependabot renovate github-actions].freeze
-
       def bot_notification?(row)
-        return false unless row[:repo_owner]
-        owner = row[:repo_owner].downcase
-        BOT_PATTERNS.any? { |p| owner.include?(p) }
+        # Check subject_author (matches Octobox's bot_author scope)
+        if row[:subject_author]
+          author = row[:subject_author].downcase
+          return true if author.include?("[bot]") || author.end_with?("-bot")
+        end
+        false
       end
 
       def sidebar_data
@@ -153,7 +154,7 @@ module OctoboxTui
           .to_h { |row| [row[:repo_name], row[:count]] }
 
         # Count bots vs humans
-        all_rows = base.select(:repo_owner).all
+        all_rows = base.select(:subject_author).all
         bot_count = all_rows.count { |r| bot_notification?(r) }
         human_count = all_rows.size - bot_count
 

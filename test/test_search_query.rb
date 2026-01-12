@@ -9,6 +9,7 @@ class TestSearchQuery < Minitest::Test
       subject_title: "Test notification",
       repo_name: "owner/repo",
       repo_owner: "owner",
+      subject_author: nil,
       reason: "mention",
       subject_type: "Issue",
       subject_state: "open",
@@ -17,22 +18,24 @@ class TestSearchQuery < Minitest::Test
       archived: false,
       muted: false
     }
+    merged = defaults.merge(attrs)
     OctoboxTui::Models::Notification.from_api({
-      "id" => defaults.merge(attrs)[:id],
+      "id" => merged[:id],
       "subject" => {
-        "title" => defaults.merge(attrs)[:subject_title],
-        "type" => defaults.merge(attrs)[:subject_type],
-        "state" => defaults.merge(attrs)[:subject_state]
+        "title" => merged[:subject_title],
+        "type" => merged[:subject_type],
+        "state" => merged[:subject_state],
+        "author" => merged[:subject_author]
       },
       "repo" => {
-        "name" => defaults.merge(attrs)[:repo_name],
-        "owner" => defaults.merge(attrs)[:repo_owner]
+        "name" => merged[:repo_name],
+        "owner" => merged[:repo_owner]
       },
-      "reason" => defaults.merge(attrs)[:reason],
-      "unread" => defaults.merge(attrs)[:unread],
-      "starred" => defaults.merge(attrs)[:starred],
-      "archived" => defaults.merge(attrs)[:archived],
-      "muted" => defaults.merge(attrs)[:muted]
+      "reason" => merged[:reason],
+      "unread" => merged[:unread],
+      "starred" => merged[:starred],
+      "archived" => merged[:archived],
+      "muted" => merged[:muted]
     })
   end
 
@@ -133,8 +136,8 @@ class TestSearchQuery < Minitest::Test
 
   def test_is_bot_filter
     query = OctoboxTui::Models::SearchQuery.new("is:bot")
-    bot = build_notification(repo_owner: "dependabot[bot]")
-    human = build_notification(repo_owner: "andrew")
+    bot = build_notification(subject_author: "dependabot[bot]")
+    human = build_notification(subject_author: "andrew")
 
     assert query.matches?(bot)
     refute query.matches?(human)
@@ -142,8 +145,8 @@ class TestSearchQuery < Minitest::Test
 
   def test_is_human_filter
     query = OctoboxTui::Models::SearchQuery.new("is:human")
-    bot = build_notification(repo_owner: "dependabot[bot]")
-    human = build_notification(repo_owner: "andrew")
+    bot = build_notification(subject_author: "dependabot[bot]")
+    human = build_notification(subject_author: "andrew")
 
     refute query.matches?(bot)
     assert query.matches?(human)

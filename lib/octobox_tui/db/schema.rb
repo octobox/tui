@@ -21,6 +21,7 @@ module OctoboxTui
           String :subject_url, text: true
           String :subject_type
           String :subject_state
+          String :subject_author
           Integer :repo_id
           String :repo_name
           String :repo_owner
@@ -38,6 +39,11 @@ module OctoboxTui
           String :resource, primary_key: true
           DateTime :last_sync
           String :error, text: true
+        end
+
+        # Migrations for existing databases
+        unless db[:notifications].columns.include?(:subject_author)
+          db.alter_table(:notifications) { add_column :subject_author, String }
         end
       end
     end

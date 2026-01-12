@@ -22,8 +22,6 @@ module OctoboxTui
       :pinned_searches
     ) do
 
-      BOT_PATTERNS = %w[[bot] dependabot renovate github-actions].freeze
-
       def self.initial(notifications: [], counts: {}, sidebar_data: {}, pinned_searches: [])
         new(
           notifications: notifications,
@@ -45,9 +43,12 @@ module OctoboxTui
       end
 
       def bot_notification?(n)
-        return false unless n.repo_owner
-        owner = n.repo_owner.downcase
-        BOT_PATTERNS.any? { |p| owner.include?(p) }
+        # Check subject_author (matches Octobox's bot_author scope)
+        if n.subject_author
+          author = n.subject_author.downcase
+          return true if author.include?("[bot]") || author.end_with?("-bot")
+        end
+        false
       end
 
       def filtered_notifications
