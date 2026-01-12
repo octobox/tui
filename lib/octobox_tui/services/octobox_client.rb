@@ -93,7 +93,7 @@ module OctoboxTui
       def mark_read(notification_ids)
         ids = Array(notification_ids)
         log.info "Marking #{ids.size} notification(s) as read"
-        get("/api/notifications/mark_read_selected.json", id: ids)
+        post("/api/notifications/mark_read_selected.json", id: ids)
       end
 
       def delete(notification_ids)
@@ -105,6 +105,13 @@ module OctoboxTui
       def user_profile
         response = get("/api/users/profile.json")
         JSON.parse(response.body)
+      end
+
+      def pinned_searches
+        log.info "Fetching pinned searches"
+        response = get("/api/pinned_searches.json")
+        data = JSON.parse(response.body)
+        data["pinned_searches"] || []
       end
 
       def log

@@ -99,9 +99,12 @@ class TestAppState < Minitest::Test
     assert new_state.loading
   end
 
-  def test_sidebar_items_empty_when_no_data
+  def test_sidebar_items_includes_tabs_even_when_no_data
     state = OctoboxTui::Models::AppState.initial
-    assert_equal [], state.sidebar_items
+    items = state.sidebar_items
+    assert items.any? { |i| i[:type] == :tab && i[:value] == :inbox }
+    assert items.any? { |i| i[:type] == :tab && i[:value] == :starred }
+    assert items.any? { |i| i[:type] == :tab && i[:value] == :archived }
   end
 
   def test_sidebar_items_includes_repos

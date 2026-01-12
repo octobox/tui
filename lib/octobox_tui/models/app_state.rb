@@ -18,10 +18,13 @@ module OctoboxTui
       :sidebar_data,
       :sidebar_filter,
       :sidebar_focus,
-      :sidebar_index
+      :sidebar_index,
+      :pinned_searches
     ) do
 
-      def self.initial(notifications: [], counts: {}, sidebar_data: {})
+      BOT_PATTERNS = %w[[bot] dependabot renovate github-actions].freeze
+
+      def self.initial(notifications: [], counts: {}, sidebar_data: {}, pinned_searches: [])
         new(
           notifications: notifications,
           filter: :inbox,
@@ -36,8 +39,15 @@ module OctoboxTui
           sidebar_data: sidebar_data,
           sidebar_filter: nil,
           sidebar_focus: false,
-          sidebar_index: 0
+          sidebar_index: 0,
+          pinned_searches: pinned_searches
         )
+      end
+
+      def bot_notification?(n)
+        return false unless n.repo_owner
+        owner = n.repo_owner.downcase
+        BOT_PATTERNS.any? { |p| owner.include?(p) }
       end
 
       def filtered_notifications
@@ -57,6 +67,12 @@ module OctoboxTui
             result.select { |n| n.subject_state == sidebar_filter[:value] }
           when :unread
             result.select { |n| n.unread == sidebar_filter[:value] }
+          when :bot
+            if sidebar_filter[:value]
+              result.select { |n| bot_notification?(n) }
+            else
+              result.reject { |n| bot_notification?(n) }
+            end
           else
             result
           end
@@ -64,8 +80,7 @@ module OctoboxTui
 
         return result if search_query.empty?
 
-        query = search_query.downcase
-        result.select { |n| n.search_text.downcase.include?(query) }
+        SearchQuery.new(search_query).filter_notifications(result)
       end
 
       def selected_notification
@@ -78,17 +93,35 @@ module OctoboxTui
       end
 
       def sidebar_items
-        return [] if sidebar_data.empty?
-
         items = []
+
+        # Main tabs first
+        items << { type: :tab, value: :inbox, label: "Inbox" }
+        items << { type: :tab, value: :starred, label: "Starred" }
+        items << { type: :tab, value: :archived, label: "Archived" }
+        items << { type: :separator }
+
+        # Pinned searches
+        unless pinned_searches.empty?
+          pinned_searches.each do |ps|
+            items << { type: :pinned, value: ps["query"], label: ps["name"], count: ps["count"] || 0 }
+          end
+          items << { type: :separator }
+        end
+
+        return items if sidebar_data.empty?
+
+        # Humans/Bots
+        humans = sidebar_data["humans"] || 0
+        bots = sidebar_data["bots"] || 0
+        items << { type: :bot, value: false, label: "Humans", count: humans } if humans > 0
+        items << { type: :bot, value: true, label: "Bots", count: bots } if bots > 0
 
         # Read/Unread
         unread = sidebar_data["unread"] || 0
         read = sidebar_data["read"] || 0
-        if unread > 0 || read > 0
-          items << { type: :unread, value: true, label: "Unread", count: unread } if unread > 0
-          items << { type: :unread, value: false, label: "Read", count: read } if read > 0
-        end
+        items << { type: :unread, value: true, label: "Unread", count: unread } if unread > 0
+        items << { type: :unread, value: false, label: "Read", count: read } if read > 0
 
         # States (Open, Merged, Closed)
         states = sidebar_data["states"] || {}
@@ -136,7 +169,7 @@ module OctoboxTui
       end
 
       def selectable_sidebar_items
-        sidebar_items.reject { |item| item[:type] == :header }
+        sidebar_items.reject { |item| [:header, :separator].include?(item[:type]) }
       end
     end
   end

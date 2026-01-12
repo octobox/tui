@@ -15,10 +15,12 @@ module OctoboxTui
         base_url: @config.base_url,
         api_token: @config.api_token
       )
+      @pinned_searches = []
       @state = Models::AppState.initial(
         notifications: @cache.load_notifications(filter: :inbox),
         counts: @cache.counts,
-        sidebar_data: @cache.sidebar_data
+        sidebar_data: @cache.sidebar_data,
+        pinned_searches: @pinned_searches
       )
       @table_state = nil
       @sidebar_state = nil
@@ -143,30 +145,24 @@ module OctoboxTui
       rows = []
       counts = @state.counts
 
-      # Add main navigation items (Inbox, Starred, Archived)
-      TAB_KEYS.each_with_index do |key, idx|
-        count = counts[key] || 0
-        is_current = @state.filter == key && @state.sidebar_filter.nil?
-        style = is_current ? @style_tab_highlight : nil
-        prefix = is_current ? "> " : "  "
-        label = TABS[idx]
-
-        cells = [
-          style ? @tui.table_cell(content: "#{prefix}#{label}", style: style) : "#{prefix}#{label}",
-          @tui.table_cell(content: count.to_s, style: @style_muted)
-        ]
-        rows << @tui.table_row(cells: cells)
-      end
-
-      # Add separator
-      rows << @tui.table_row(cells: ["", ""])
-
-      # Add filter items from sidebar_data
+      # Add all sidebar items
       @state.sidebar_items.each do |item|
-        if item[:type] == :header
-          cells = [
+        cells = case item[:type]
+        when :header
+          [
             @tui.table_cell(content: item[:label], style: @style_header),
             ""
+          ]
+        when :separator
+          ["", ""]
+        when :tab
+          count = counts[item[:value]] || 0
+          is_current = @state.filter == item[:value] && @state.sidebar_filter.nil?
+          style = is_current ? @style_tab_highlight : nil
+          prefix = is_current ? "> " : "  "
+          [
+            style ? @tui.table_cell(content: "#{prefix}#{item[:label]}", style: style) : "#{prefix}#{item[:label]}",
+            @tui.table_cell(content: count.to_s, style: @style_muted)
           ]
         else
           indent = item[:indent] ? "    " : "  "
@@ -177,6 +173,8 @@ module OctoboxTui
           when :reason then item[:value].to_s.tr("_", " ")
           when :state then item[:value].to_s.capitalize
           when :unread then item[:value] ? "Unread" : "Read"
+          when :bot then item[:value] ? "Bots" : "Humans"
+          when :pinned then item[:label]
           else item[:value].to_s
           end
 
@@ -212,7 +210,7 @@ module OctoboxTui
           display_label = truncate(label.to_s, item[:indent] ? 14 : 16)
           cell_content = "#{prefix}#{state_indicator}#{display_label}"
 
-          cells = [
+          [
             style ? @tui.table_cell(content: cell_content, style: style) : cell_content,
             @tui.table_cell(content: item[:count].to_s, style: @style_muted)
           ]
@@ -358,7 +356,7 @@ module OctoboxTui
       elsif @state.sidebar_focus
         "j/k:move  Enter:select  l/Right:list  Esc:clear filter  q:quit"
       else
-        "j/k:move  h/Left:sidebar  /:search  o:open  s:star  e:archive  m:mute  r:refresh  ?:help  q:quit"
+        "j/k:move  h:sidebar  /:search  o:open  s:star  e:archive  C-a:archive all  m:mute  r:refresh  ?:help  q:quit"
       end
       frame.render_widget(
         @tui.paragraph(text: " #{help_text}", style: @style_muted),
@@ -421,7 +419,9 @@ module OctoboxTui
         elsif @state.search_mode
           exit_search_mode
         elsif @state.sidebar_filter
+          # Clear filter and reload from cache
           @state = @state.with(sidebar_filter: nil, selected_index: 0)
+          reload_notifications
           @table_state.select(0)
         elsif @state.sidebar_focus
           @state = @state.with(sidebar_focus: false)
@@ -502,6 +502,12 @@ module OctoboxTui
       in { type: :key, code: "m" }
         mute_selected
 
+      in { type: :key, code: "a", modifiers: ["ctrl"] }
+        archive_all
+
+      in { type: :key, code: "u", modifiers: ["ctrl"] }
+        unarchive_all
+
       in { type: :key, code: "r" }
         refresh_all unless @state.search_mode
 
@@ -538,15 +544,15 @@ module OctoboxTui
       current = @sidebar_state.selected || 0
       new_index = current
 
-      # Skip headers when moving
+      # Skip headers and separators when moving
       loop do
         new_index = (new_index + delta).clamp(0, items.size - 1)
-        break if items[new_index][:type] != :header
+        break unless [:header, :separator].include?(items[new_index][:type])
         break if new_index == 0 || new_index == items.size - 1
       end
 
-      # If we landed on a header, try to move past it
-      if items[new_index][:type] == :header
+      # If we landed on a header/separator, try to move past it
+      if [:header, :separator].include?(items[new_index][:type])
         new_index = (new_index + delta).clamp(0, items.size - 1)
       end
 
@@ -564,7 +570,43 @@ module OctoboxTui
 
       selected_idx = @sidebar_state.selected || 0
       item = items[selected_idx]
-      return if item.nil? || item[:type] == :header
+      return if item.nil? || item[:type] == :header || item[:type] == :separator
+
+      # Handle tab selection (Inbox/Starred/Archived)
+      if item[:type] == :tab
+        filter = item[:value]
+        @selected_tab = TAB_KEYS.index(filter) || 0
+        notifications = @cache.load_notifications(filter: filter)
+        @state = @state.with(
+          filter: filter,
+          notifications: notifications,
+          sidebar_filter: nil,
+          sidebar_focus: false,
+          selected_index: 0,
+          search_query: ""
+        )
+        @table_state.select(0)
+        return
+      end
+
+      # Handle pinned search selection - filter cached notifications client-side
+      if item[:type] == :pinned
+        log.info "Applying pinned search: #{item[:label]} (#{item[:value]})"
+        # Load all inbox notifications from cache and apply the search filter
+        all_notifications = @cache.load_notifications(filter: :inbox)
+        search = Models::SearchQuery.new(item[:value])
+        filtered = search.filter_notifications(all_notifications)
+        log.info "Pinned search matched #{filtered.size} of #{all_notifications.size} notifications"
+
+        @state = @state.with(
+          notifications: filtered,
+          sidebar_filter: { type: :pinned, value: item[:value], label: item[:label] },
+          sidebar_focus: false,
+          selected_index: 0
+        )
+        @table_state.select(0)
+        return
+      end
 
       # Toggle filter - if same filter, clear it
       if @state.sidebar_filter &&
@@ -572,8 +614,10 @@ module OctoboxTui
          @state.sidebar_filter[:value] == item[:value]
         @state = @state.with(sidebar_filter: nil, sidebar_focus: false, selected_index: 0)
       else
+        new_filter = { type: item[:type], value: item[:value] }
+        log.info "Setting sidebar filter: #{new_filter.inspect}"
         @state = @state.with(
-          sidebar_filter: { type: item[:type], value: item[:value] },
+          sidebar_filter: new_filter,
           sidebar_focus: false,
           selected_index: 0
         )
@@ -624,10 +668,24 @@ module OctoboxTui
 
     def open_selected
       notification = @state.filtered_notifications[@state.selected_index]
-      log.info "Opening: #{notification&.subject_title}"
-      log.info "  URL: #{notification&.web_url}"
-      if notification&.web_url
+      return unless notification
+
+      log.info "Opening: #{notification.subject_title}"
+      log.info "  URL: #{notification.web_url}"
+
+      if notification.web_url
         Services::Browser.open(notification.web_url)
+
+        # Update UI immediately
+        @cache.update_notification(notification.id, unread: false)
+        reload_notifications
+
+        # API call in background
+        Thread.new do
+          @client.mark_read(notification.id)
+        rescue => e
+          log.error "Mark read failed: #{e.message}"
+        end
       else
         log.warn "  No URL to open"
       end
@@ -637,18 +695,62 @@ module OctoboxTui
       notification = @state.filtered_notifications[@state.selected_index]
       return unless notification
 
+      new_archived = !notification.archived
+
+      # Update UI immediately
+      @cache.update_notification(notification.id, archived: new_archived)
+      reload_notifications
+
+      # API call in background
       Thread.new do
-        if notification.archived
-          @client.unarchive(notification.id)
-          @cache.update_notification(notification.id, archived: false)
-        else
+        if new_archived
           @client.archive(notification.id)
-          @cache.update_notification(notification.id, archived: true)
+        else
+          @client.unarchive(notification.id)
         end
-        reload_notifications
       rescue => e
         log.error "Archive toggle failed: #{e.message}"
-        @state = @state.with(error: e.message)
+        # Revert on failure
+        @cache.update_notification(notification.id, archived: !new_archived)
+        reload_notifications
+      end
+    end
+
+    def archive_all
+      notifications = @state.filtered_notifications
+      return if notifications.empty?
+
+      log.info "Archiving all #{notifications.size} visible notifications"
+
+      # Update UI immediately
+      ids = notifications.map(&:id)
+      ids.each { |id| @cache.update_notification(id, archived: true) }
+      reload_notifications
+
+      # API call in background
+      Thread.new do
+        @client.archive(ids)
+      rescue => e
+        log.error "Archive all failed: #{e.message}"
+      end
+    end
+
+    def unarchive_all
+      notifications = @state.filtered_notifications
+      return if notifications.empty?
+
+      log.info "Unarchiving all #{notifications.size} visible notifications"
+
+      # Update UI immediately
+      ids = notifications.map(&:id)
+      ids.each { |id| @cache.update_notification(id, archived: false) }
+      reload_notifications
+
+      # API call in background
+      Thread.new do
+        @client.unarchive(ids)
+      rescue => e
+        log.error "Unarchive all failed: #{e.message}"
       end
     end
 
@@ -656,13 +758,20 @@ module OctoboxTui
       notification = @state.filtered_notifications[@state.selected_index]
       return unless notification
 
+      new_starred = !notification.starred
+
+      # Update UI immediately
+      @cache.update_notification(notification.id, starred: new_starred)
+      reload_notifications
+
+      # API call in background
       Thread.new do
         @client.star(notification.id)
-        @cache.update_notification(notification.id, starred: !notification.starred)
-        reload_notifications
       rescue => e
         log.error "Star toggle failed: #{e.message}"
-        @state = @state.with(error: e.message)
+        # Revert on failure
+        @cache.update_notification(notification.id, starred: !new_starred)
+        reload_notifications
       end
     end
 
@@ -670,21 +779,40 @@ module OctoboxTui
       notification = @state.filtered_notifications[@state.selected_index]
       return unless notification
 
+      # Update UI immediately
+      @cache.update_notification(notification.id, muted: true, archived: true)
+      reload_notifications
+
+      # API call in background
       Thread.new do
         @client.mute(notification.id)
-        @cache.update_notification(notification.id, muted: true, archived: true)
-        reload_notifications
       rescue => e
         log.error "Mute failed: #{e.message}"
-        @state = @state.with(error: e.message)
+        # Revert on failure
+        @cache.update_notification(notification.id, muted: false, archived: false)
+        reload_notifications
       end
     end
 
     def reload_notifications
+      # Don't reload from cache if we're viewing pinned search results
+      # (pinned search results come from API, not cache)
+      if @state.sidebar_filter && @state.sidebar_filter[:type] == :pinned
+        counts = @cache.counts
+        sidebar_data = @cache.sidebar_data
+        @state = @state.with(counts: counts, sidebar_data: sidebar_data, pinned_searches: @pinned_searches)
+        return
+      end
+
       notifications = @cache.load_notifications(filter: @state.filter)
       counts = @cache.counts
       sidebar_data = @cache.sidebar_data
-      @state = @state.with(notifications: notifications, counts: counts, sidebar_data: sidebar_data).clamp_selection
+      @state = @state.with(
+        notifications: notifications,
+        counts: counts,
+        sidebar_data: sidebar_data,
+        pinned_searches: @pinned_searches
+      ).clamp_selection
       @table_state.select(@state.selected_index)
     end
 
@@ -733,6 +861,11 @@ module OctoboxTui
 
         @state = @state.with(loading: true, syncing: false)
 
+        # Fetch pinned searches
+        log.info "Fetching pinned searches..."
+        @pinned_searches = @client.pinned_searches
+        log.info "Got #{@pinned_searches.size} pinned searches"
+
         # Fetch all notifications
         log.info "Fetching notifications from Octobox..."
         all_notifications = @client.fetch_all_notifications
@@ -743,9 +876,9 @@ module OctoboxTui
 
         # Build sidebar data from cache
         sidebar_data = @cache.sidebar_data
-        log.info "Built sidebar: #{sidebar_data["unread_repositories"]&.size} repos, #{sidebar_data["types"]&.size} types, #{sidebar_data["reasons"]&.size} reasons"
+        log.info "Built sidebar: #{sidebar_data["owner_counts"]&.size} owners, #{sidebar_data["types"]&.size} types, #{sidebar_data["reasons"]&.size} reasons"
 
-        @state = @state.with(sidebar_data: sidebar_data)
+        @state = @state.with(sidebar_data: sidebar_data, pinned_searches: @pinned_searches)
         reload_notifications
         log.info "Sync complete, #{@state.notifications.size} notifications in current view"
       rescue => e

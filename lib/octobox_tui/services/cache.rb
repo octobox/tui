@@ -114,6 +114,14 @@ module OctoboxTui
         status&.dig(:last_sync)
       end
 
+      BOT_PATTERNS = %w[[bot] dependabot renovate github-actions].freeze
+
+      def bot_notification?(row)
+        return false unless row[:repo_owner]
+        owner = row[:repo_owner].downcase
+        BOT_PATTERNS.any? { |p| owner.include?(p) }
+      end
+
       def sidebar_data
         base = db[:notifications].where(archived: false, muted: false)
 
@@ -144,6 +152,11 @@ module OctoboxTui
           .all
           .to_h { |row| [row[:repo_name], row[:count]] }
 
+        # Count bots vs humans
+        all_rows = base.select(:repo_owner).all
+        bot_count = all_rows.count { |r| bot_notification?(r) }
+        human_count = all_rows.size - bot_count
+
         {
           "owner_counts" => owner_counts,
           "repos_by_owner" => repos_by_owner,
@@ -164,7 +177,9 @@ module OctoboxTui
             .all
             .to_h { |row| [row[:subject_state], row[:count]] },
           "unread" => base.where(unread: true).count,
-          "read" => base.where(unread: false).count
+          "read" => base.where(unread: false).count,
+          "bots" => bot_count,
+          "humans" => human_count
         }
       end
     end
