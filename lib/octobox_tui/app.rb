@@ -55,6 +55,7 @@ module OctoboxTui
 
         loop do
           render
+          auto_focus_sidebar_if_empty
           break if handle_input == :quit
         end
       end
@@ -657,7 +658,14 @@ module OctoboxTui
       filter = TAB_KEYS[@selected_tab]
       notifications = @cache.load_notifications(filter: filter)
       counts = @cache.counts
-      @state = @state.with(filter: filter, notifications: notifications, counts: counts, selected_index: 0, search_query: "")
+      @state = @state.with(
+        filter: filter,
+        notifications: notifications,
+        counts: counts,
+        selected_index: 0,
+        search_query: "",
+        sidebar_filter: nil
+      )
       @table_state.select(0)
     end
 
@@ -679,6 +687,13 @@ module OctoboxTui
       return if @state.search_query.empty?
       @state = @state.with(search_query: @state.search_query[0..-2], selected_index: 0)
       @table_state.select(0)
+    end
+
+    def auto_focus_sidebar_if_empty
+      return if @state.sidebar_focus
+      return if @state.search_mode
+      return unless @state.filtered_notifications.empty?
+      @state = @state.with(sidebar_focus: true)
     end
 
     def check_for_updates
@@ -731,7 +746,9 @@ module OctoboxTui
       if @state.sidebar_filter && @state.sidebar_filter[:type] == :pinned
         if new_archived
           updated = @state.notifications.reject { |n| n.id == notification.id }
-          @state = @state.with(notifications: updated).clamp_selection
+          counts = @cache.counts
+          sidebar_data = @cache.sidebar_data
+          @state = @state.with(notifications: updated, counts: counts, sidebar_data: sidebar_data).clamp_selection
           @table_state.select(@state.selected_index)
         end
       else
@@ -765,7 +782,9 @@ module OctoboxTui
 
       # Update UI - for pinned searches, clear the list since all are archived
       if @state.sidebar_filter && @state.sidebar_filter[:type] == :pinned
-        @state = @state.with(notifications: [], selected_index: 0)
+        counts = @cache.counts
+        sidebar_data = @cache.sidebar_data
+        @state = @state.with(notifications: [], selected_index: 0, counts: counts, sidebar_data: sidebar_data)
         @table_state.select(0)
       else
         reload_notifications
@@ -829,7 +848,9 @@ module OctoboxTui
       # Update UI - for pinned searches, remove item from list
       if @state.sidebar_filter && @state.sidebar_filter[:type] == :pinned
         updated = @state.notifications.reject { |n| n.id == notification.id }
-        @state = @state.with(notifications: updated).clamp_selection
+        counts = @cache.counts
+        sidebar_data = @cache.sidebar_data
+        @state = @state.with(notifications: updated, counts: counts, sidebar_data: sidebar_data).clamp_selection
         @table_state.select(@state.selected_index)
       else
         reload_notifications
